@@ -1,99 +1,77 @@
-const knex = require("../database/knex")
+const { hash, compare } = require("bcryptjs");
+const AppError = require("../utils/AppError");
 
-class NotesController {
+const sqliteConnection = require("../database/sqlite");
+
+class UsersController {
   async create(request, response) {
-    const { title, description, tags, links } = request.body
-    const { user_id } = request.params
+    const { name, email, password } = request.body;
 
-    const [note_id] = await knex("notes").insert({
-      title,
-      description,
-      user_id
-    })
+    const database = await sqliteConnection();
+    const checkUserExists = await database.get("SELECT * FROM users WHERE email = (?)", [email]);
 
-    const linksInsert = links.map(link => {
-      return {
-        note_id,
-        url: link
-      }
-    })
-
-    await knex("links").insert(linksInsert)
-
-    const tagsInsert = tags.map(name => {
-      return {
-        note_id,
-        name,
-        user_id
-      }
-    })
-
-    await knex("tags").insert(tagsInsert)
-
-    return response.json()
-  }
-
-  async show(request, response) {
-    const { id } = request.params
-
-    const note = await knex("notes").where({ id }).first()
-    const tags = await knex("tags").where({ note_id: id }).orderBy("name")
-    const links = await knex("links").where({ note_id: id }).orderBy("created_at")
-
-    return response.json({
-      ...note,
-      tags,
-      links
-    })
-  }
-
-  async delete(request, response) {
-    const { id } = request.params
-
-    await knex("notes").where({ id }).delete()
-
-    return response.json()
-  }
-
-  async index(request, response) {
-    const { title, user_id, tags } = request.query
-
-    let notes
-
-    if (tags) {
-      const filterTags = tags.split(',').map(tag => tag.trim())
-
-      notes = await knex("tags")
-        .select([
-          "notes.id",
-          "notes.title",
-          "notes.user_id",
-        ])
-        .where("notes.user_id", user_id)
-        .whereLike("notes.title", `%${title}%`)
-        .whereIn("name", filterTags)
-        .innerJoin("notes", "notes.id", "tags.note_id")
-        .orderBy("notes.title")
-        
-    } else {
-      notes = await knex("notes")
-      .where({ user_id })
-      .whereLike("title", `%${title}%`)
-      .orderBy("title")
+    if (checkUserExists) {
+      throw new AppError("Este e-mail já está em uso.");
     }
 
-    const userTags = await knex("tags").where({ user_id })
-    const notesWhithTags = notes.map(note => {
-      const noteTags = userTags.filter(tag => tag.note_id === note.id)
+    const hashedPassword = await hash(password, 8);
 
-      return {
-        ...note,
-        tags: noteTags
+    await database.run(
+      'INSERT INTO users (name, email, password) VALUES (?, ?, ?)',
+      [name, email, hashedPassword]
+    );
+
+    return response.status(201).json();
+  }
+
+  async update(request, response) {
+    const { name, email, password, old_password } = request.body;
+    const user_id = request.user.id;
+
+    const database = await sqliteConnection();
+    const user = await database.get("SELECT * FROM users WHERE id = (?)", [user_id]);
+
+    if (!user) {
+      throw new AppError("Usuário não encontrado");
+    }
+
+    const userWithUpdatedEmail = await database.get("SELECT * FROM users WHERE email = (?)", [email]);
+
+    if (userWithUpdatedEmail && userWithUpdatedEmail.id !== user.id) {
+      throw new AppError("Este e-mail já está em uso.");
+    }
+
+    user.name = name ?? user.name;
+    user.email = email ?? user.email;
+
+    if (password && !old_password) {
+      throw new AppError(
+        "Você precisa informar a senha antiga para definir a nova senha.",
+      );
+    }
+
+    if (password && old_password) {
+      const checkOldPassword = await compare(old_password, user.password);
+
+      if (!checkOldPassword) {
+        throw new AppError("A senha antiga não confere.");
       }
-    })
 
-    return response.json(notesWhithTags)
+      user.password = await hash(password, 8);
+    }
+
+    await database.run(
+      `UPDATE users SET 
+      name = ?, 
+      email = ?, 
+      password = ?, 
+      updated_at = DATETIME('now')
+      WHERE id = ?`,
+      [user.name, user.email, user.password, user_id]
+    );
+
+    return response.json();
   }
 }
 
-module.exports = NotesController
+module.exports = UsersController;
